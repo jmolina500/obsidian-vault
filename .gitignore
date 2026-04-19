@@ -1,0 +1,17 @@
+# Obsidian
+.obsidian/
+.trash/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.swp
+*~
+
+# Large files (optional - uncomment if needed)
+# *.pdf
+# *.mp4
+# *.mov
