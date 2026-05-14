@@ -1,23 +1,58 @@
-# Hermes Web UI + Tailscale Setup (Ubuntu VM on Proxmox)
+# Hermes Web UI + Tailscale + MagicDNS Setup Guide (Ubuntu VM on Proxmox)
 
-## Goal
+## Objective
 
-* Run Hermes Web UI persistently
-* Access it securely via Tailscale
-* No manual restarts
-* Survives reboot
+This guide walks through installing Hermes Web UI on an Ubuntu Server VM running in Proxmox and exposing it securely through Tailscale using MagicDNS.
+
+Final result:
+
+* Hermes Web UI runs automatically after reboot
+* Accessible securely via browser using:
+
+  ```text
+  http://jimmy.tailfbd95.ts.net
+  ```
+* No manual startup required
+* Windows client properly resolves MagicDNS
 
 ---
 
-# 1. Prerequisites
+# Architecture Overview
 
-* Ubuntu Server 22.04 or newer
-* Root access (this guide assumes you are root)
-* Internet access
+```text
+Windows Browser
+   ↓
+MagicDNS (Tailscale DNS)
+   ↓
+http://jimmy.tailfbd95.ts.net
+   ↓
+Tailscale Serve
+   ↓
+127.0.0.1:8787
+   ↓
+Hermes Web UI
+```
 
 ---
 
-# 2. Update System
+# Prerequisites
+
+Server:
+
+* Ubuntu Server 24.04+ VM in Proxmox
+* Root access
+* Internet connectivity
+
+Client:
+
+* Windows machine with Tailscale installed
+* Logged into same Tailscale account
+
+---
+
+# Step 1 — Update Ubuntu Server
+
+Run as root:
 
 ```bash
 apt update && apt upgrade -y
@@ -25,67 +60,86 @@ apt update && apt upgrade -y
 
 ---
 
-# 3. Install Dependencies
+# Step 2 — Install Dependencies
+
+Run as root:
 
 ```bash
-apt install -y git python3 python3-pip curl
+apt install -y git python3 python3-pip curl micro
 ```
 
 Optional:
 
 ```bash
-apt install -y python3-venv
+apt install -y python3-venv dnsutils
 ```
 
 ---
 
-# 4. Install Tailscale
+# Step 3 — Install Tailscale on Ubuntu Server
+
+Run:
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
 ```
 
-Start and authenticate:
+Bring Tailscale online:
 
 ```bash
 tailscale up
 ```
 
-Follow the login URL shown in the terminal.
+Follow the authentication URL shown in terminal.
 
----
-
-# 5. Verify Tailscale
+Verify:
 
 ```bash
 tailscale status
 ```
 
----
+Expected:
 
-# 6. Install Hermes Web UI
-
-```bash
-cd ~
-git clone https://github.com/nesquena/hermes-webui.git
-cd hermes-webui
+```text
+100.x.x.x   jimmy   jesus.molina@...
 ```
 
 ---
 
-# 7. Test Hermes (Initial Run)
+# Step 4 — Install Hermes Web UI
 
-Run this inside the Hermes directory:
+Change to root home:
 
 ```bash
-cd ~/hermes-webui
+cd /root
+```
+
+Clone repository:
+
+```bash
+git clone https://github.com/nesquena/hermes-webui.git
+```
+
+Enter directory:
+
+```bash
+cd /root/hermes-webui
+```
+
+---
+
+# Step 5 — Initial Hermes Test
+
+Run:
+
+```bash
 python3 bootstrap.py
 ```
 
-Expected output:
+Expected:
 
 ```text
-[bootstrap] Web UI is ready: http://localhost:8787
+Hermes Web UI listening on http://127.0.0.1:8787
 ```
 
 Test locally:
@@ -96,7 +150,7 @@ curl http://127.0.0.1:8787
 
 You should see HTML output.
 
-Stop the process:
+Stop test:
 
 ```text
 CTRL + C
@@ -104,9 +158,37 @@ CTRL + C
 
 ---
 
-# 8. Create systemd Service (Persistent Setup)
+# Important Behavior
 
-Create the service file:
+Hermes bootstrap behaves differently than normal services.
+
+`bootstrap.py` starts the web server, then exits.
+
+This means:
+
+```bash
+systemctl status hermes-webui
+```
+
+may show:
+
+```text
+active (exited)
+```
+
+That can be normal depending on bootstrap behavior.
+
+In your final setup, Hermes runs via:
+
+```text
+/root/.hermes/hermes-agent/venv/bin/python /root/hermes-webui/server.py
+```
+
+---
+
+# Step 6 — Create systemd Service
+
+Create file:
 
 ```bash
 micro /etc/systemd/system/hermes-webui.service
@@ -117,7 +199,8 @@ Paste:
 ```ini
 [Unit]
 Description=Hermes Web UI
-After=network.target
+After=network.target tailscaled.service
+Requires=tailscaled.service
 
 [Service]
 Type=simple
@@ -125,16 +208,19 @@ WorkingDirectory=/root/hermes-webui
 ExecStart=/usr/bin/python3 /root/hermes-webui/bootstrap.py
 Restart=always
 RestartSec=5
-
-RemainAfterExit=yes
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+Save and exit.
+
 ---
 
-# 9. Enable and Start Service
+# Step 7 — Enable Hermes Service
+
+Run:
 
 ```bash
 systemctl daemon-reexec
@@ -143,27 +229,29 @@ systemctl enable hermes-webui
 systemctl start hermes-webui
 ```
 
----
-
-# 10. Verify Service
+Verify:
 
 ```bash
-systemctl status hermes-webui
+systemctl status hermes-webui --no-pager
 ```
 
 Expected:
 
 ```text
-Active: active (exited)
+Active: active (running)
 ```
 
-This is normal behavior.
+and:
+
+```text
+Hermes Web UI listening on http://127.0.0.1:8787
+```
 
 ---
 
-# 11. Confirm Hermes is Running
+# Step 8 — Verify Hermes Locally
 
-Check the port:
+Check listening port:
 
 ```bash
 ss -tulnp | grep 8787
@@ -175,47 +263,41 @@ Expected:
 127.0.0.1:8787 LISTEN
 ```
 
-Test again:
+Test:
 
 ```bash
 curl http://127.0.0.1:8787
 ```
 
----
-
-# Important Behavior
-
-Hermes works as follows:
-
-* `bootstrap.py` starts the web server
-* The script exits after launching it
-* systemd shows "active (exited)"
-* The actual web server continues running
-
-This is expected and correct.
+Expected:
+HTML output.
 
 ---
 
-# 12. Configure Tailscale Serve
+# Step 9 — Configure Tailscale Serve
 
-Reset any previous configuration:
+Clear any previous config:
 
 ```bash
 tailscale serve --https=443 off
 tailscale serve --http=80 off
 ```
 
-If you see an error like "handler does not exist", it can be ignored.
+If you see:
 
-Start the service in the background:
+```text
+handler does not exist
+```
+
+it can be ignored.
+
+Configure background proxy:
 
 ```bash
 tailscale serve --bg --http=80 8787
 ```
 
----
-
-# 13. Verify Tailscale Serve
+Verify:
 
 ```bash
 tailscale serve status
@@ -224,121 +306,229 @@ tailscale serve status
 Expected:
 
 ```text
-http://<your-node>.tailnet.ts.net
-|-- proxy http://127.0.0.1:8787
+http://jimmy.tailfbd95.ts.net
+|-- / proxy http://127.0.0.1:8787
 ```
 
 ---
 
-# 14. Access the Web UI
+# Step 10 — Ensure Tailscale Starts Automatically
 
-Use HTTP:
+Run:
 
-```text
-http://<your-node>.tailnet.ts.net
+```bash
+systemctl enable tailscaled
 ```
 
-Example:
+Verify:
+
+```bash
+systemctl status tailscaled --no-pager
+```
+
+Expected:
+
+```text
+Active: active (running)
+```
+
+---
+
+# Step 11 — Windows Client MagicDNS Configuration
+
+This step is critical.
+
+Without this, browser access will fail with DNS resolution errors.
+
+Open Windows PowerShell as your normal user.
+
+Run:
+
+```powershell
+tailscale set --accept-dns=true
+```
+
+Verify:
+
+```powershell
+tailscale debug prefs
+```
+
+Expected:
+
+```json
+"CorpDNS": true
+```
+
+This means Tailscale DNS integration is active.
+
+---
+
+# Step 12 — Verify Windows DNS
+
+Run:
+
+```powershell
+Get-DnsClientServerAddress
+```
+
+Expected to see Tailscale DNS:
+
+```text
+Tailscale
+100.100.100.100
+fd7a:115c:a1e0::53
+```
+
+Test DNS:
+
+```powershell
+nslookup jimmy.tailfbd95.ts.net
+```
+
+Expected:
+
+```text
+Address: 100.125.61.17
+```
+
+---
+
+# Step 13 — Browser Access
+
+Open:
 
 ```text
 http://jimmy.tailfbd95.ts.net
 ```
 
-Do not use HTTPS in this setup.
+The Hermes Web UI should load.
 
 ---
 
-# 15. Persistence After Reboot
+# Troubleshooting
 
-After reboot:
+## Hermes service failed
 
-* Tailscale starts automatically
-* Hermes starts via systemd
-* Tailscale Serve remains active
-* Web UI is accessible without manual steps
-
----
-
-# 16. Troubleshooting
-
-Check if Hermes is running:
+Check:
 
 ```bash
-ss -tulnp | grep 8787
-curl http://127.0.0.1:8787
+systemctl status hermes-webui --no-pager
+journalctl -u hermes-webui -f
 ```
 
-Restart Hermes:
+Restart:
 
 ```bash
 systemctl restart hermes-webui
 ```
 
-View logs:
+---
+
+## Hermes not listening
+
+Check:
 
 ```bash
-journalctl -u hermes-webui -f
+ss -tulnp | grep 8787
 ```
 
-Check Tailscale:
+If empty:
+
+```bash
+systemctl restart hermes-webui
+```
+
+---
+
+## Tailscale proxy missing
+
+Check:
 
 ```bash
 tailscale serve status
-tailscale status
+```
+
+If empty:
+
+```bash
+tailscale serve --bg --http=80 8787
 ```
 
 ---
 
-# 17. Common Issues
+## MagicDNS not resolving
 
-Web UI not loading:
+Check Windows:
 
-* Hermes may not be running. Restart the service.
+```powershell
+tailscale debug prefs
+```
 
-SSL errors:
+If:
 
-* Use HTTP instead of HTTPS.
+```json
+"CorpDNS": false
+```
 
-"handler does not exist":
+Fix:
 
-* This can be ignored.
-
-Browser issues:
-
-* Try incognito mode or clear cache.
+```powershell
+tailscale set --accept-dns=true
+```
 
 ---
 
-# 18. Architecture Overview
+## Direct emergency access
+
+If MagicDNS fails temporarily:
+
+```powershell
+ssh -L 8787:127.0.0.1:8787 root@100.125.61.17
+```
+
+Then browser:
 
 ```text
-Browser
-   ↓
-http://tailnet URL
-   ↓
-Tailscale Serve
-   ↓
-127.0.0.1:8787
-   ↓
-Hermes Web UI
+http://localhost:8787
+```
+
+---
+
+# Permanent Verification Checklist
+
+Server:
+
+```bash
+systemctl status hermes-webui
+systemctl status tailscaled
+tailscale serve status
+ss -tulnp | grep 8787
+curl http://127.0.0.1:8787
+```
+
+Windows:
+
+```powershell
+tailscale status
+tailscale debug prefs
+nslookup jimmy.tailfbd95.ts.net
+```
+
+Browser:
+
+```text
+http://jimmy.tailfbd95.ts.net
 ```
 
 ---
 
 # Final Result
 
-* Persistent service
-* Remote access via Tailscale
-* No manual startup required
-* Clean and stable setup
+Persistent Hermes Web UI deployment with:
 
----
-
-# Optional Improvements
-
-* Run Hermes under a non-root user
-* Add reverse proxy (Caddy or Nginx)
-* Serve multiple applications under one domain
-* Add authentication layer
-
----
+* automatic startup
+* secure Tailscale access
+* MagicDNS browser access
+* fallback SSH tunnel access
+* stable production-style setup
